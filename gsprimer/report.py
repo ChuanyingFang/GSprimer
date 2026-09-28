@@ -376,7 +376,9 @@ def _pair_card(p, adapter_f: str, adapter_r: str, schemes,
     <div style="margin-top:6px">{seq_blocks}</div>
     <div style="margin-top:8px;font-size:12px;color:#666">
       Grey = fixed adapter; bold = template-specific region; PCR product {sheet['product_len']} bp,
-      insert after digestion {sheet['insert_len']} bp
+      insert after digestion {sheet['insert_len']} bp.
+      Tm / GC below refer to the <b>core primer (adapter excluded)</b>; the full ordered primer's
+      Tm is higher and is not used for annealing planning.
     </div>
   </div>
   {_construct_diagram(sheet, p)}
@@ -550,10 +552,11 @@ relative to ATG, always a multiple of 3. <b>BsaI</b> / <b>PaqCI</b> = number of 
 type-IIS sites found inside the PCR product for the seamless (BsaI) and Golden Gate (PaqCI) schemes
 respectively — 0 in both is required for clean assembly.</p>
 <table><tr><th>#</th><th>Tier</th><th>offset</th>
-<th>Forward 5'→3'</th><th>nt</th><th>Tm</th><th>GC%</th>
-<th>Reverse 5'→3'</th><th>nt</th><th>Tm</th><th>GC%</th>
+<th>Forward 5'→3'</th><th>nt</th><th>Tm (core)</th><th>GC%</th>
+<th>Reverse 5'→3'</th><th>nt</th><th>Tm (core)</th><th>GC%</th>
 <th>ΔTm</th><th>Product bp</th><th>BsaI</th><th>PaqCI</th><th>Risk</th><th>Flags</th></tr>
 {cand_rows}</table>
+<p style="font-size:12.5px;color:#666"><b>Tm (core)</b>: melting temperature of the <b>primer core only</b> (template-specific region), computed <b>without</b> the 5' adapter / type-IIS module (≈17 nt). Ordered primers include the adapter, but its length and Tm are <b>excluded</b> from this column — the full ordered primer's Tm is ~6–9 °C higher and is <b>not</b> used for annealing-temperature planning. ΔTm is computed between the two core Tms.</p>
 
 {'<h2>3. Standard anchor pair &amp; candidate risk assessment</h2>' + sel_html if sel_html else
  '<h2>3. Selected primer pairs</h2><p class="warn">No primer pair selected yet '
@@ -562,8 +565,8 @@ respectively — 0 in both is required for clean assembly.</p>
 <h2>{'4' if sel_html else '4'}. Design parameters</h2>
 <table><tr><th>Parameter</th><th>Value</th></tr>{param_rows}</table>
 
-<footer>GSprimer v1.1 · thermodynamics &amp; filters inherited from SpacerFinder v2.4.5
-(amplicon-size limit excluded) · palette Fv1.4</footer>
+<footer>GSprimer v1.2.0 · thermodynamics &amp; filters inherited from SpacerFinder v2.4.5
+(amplicon-size limit excluded) · Tm shown is the core-primer Tm (adapter excluded) · palette Fv1.4</footer>
 </body></html>'''
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
