@@ -281,11 +281,14 @@ def _pair_from_dict(d: Dict) -> PrimerPair:
 def candidate_table(pairs: List[PrimerPair]) -> str:
     hdr = (f"{'#':>3} {'★':1} {'T':1} {'off':>4} {'F primer':<25}{'nt':>3}"
            f"{'Tm':>6}{'GC':>5}  {'R primer':<25}{'nt':>3}{'Tm':>6}{'GC':>5}"
-           f"{'dTm':>5}{'bp':>7}{'BsaI':>5}  {'risk':<7} flags")
+           f"{'dTm':>5}{'bp':>7}{'B/P':>5}  {'risk':<7} flags")
     lines = [hdr, "-" * len(hdr)]
     for i, p in enumerate(pairs, 1):
         r = p.risk or {}
-        enz = r.get("enzyme", {})
+        enz = r.get("enzyme", {}) or {}
+        enz_gg = r.get("enzyme_gg", {}) or {}
+        b = enz.get("n_total", "-")
+        pq = enz_gg.get("n_total", "-")
         lines.append(
             f"{i:>3} {'*' if p.is_anchor else ' '} {p.tier} {p.offset:>+4} "
             f"{p.f_seq:<25}{p.f_len:>3}{p.f_qc['tm']:>6.1f}"
@@ -293,6 +296,20 @@ def candidate_table(pairs: List[PrimerPair]) -> str:
             f"{p.r_seq:<25}{p.r_len:>3}{p.r_qc['tm']:>6.1f}"
             f"{p.r_qc['gc'] * 100:>5.0f}"
             f"{p.tm_diff:>5.1f}{p.amplicon_len:>7}"
-            f"{enz.get('n_total', '-'):>5}  "
+            f"{f'{b}/{pq}':>5}  "
             f"{r.get('overall', '-'):<7} {'; '.join(p.flags)[:46]}")
     return "\n".join(lines)
+
+
+def load_state(outdir: str = ".") -> Optional[Dict]:
+    """Read the cached design state (returns None if absent)."""
+    state_path = os.path.join(outdir, STATE_NAME)
+    if not os.path.exists(state_path):
+        return None
+    with open(state_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def pairs_from_state(st: Dict) -> List[PrimerPair]:
+    """Reconstruct PrimerPair objects from a cached design state."""
+    return [_pair_from_dict(d) for d in st.get("pairs", [])]

@@ -12,7 +12,7 @@ Quick start
     fin = run_finalize([1], outdir="out")
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 from .adapters import ADAPTER_F, ADAPTER_R, order_sheet, parse_adapter
 from .design import PrimerPair, design

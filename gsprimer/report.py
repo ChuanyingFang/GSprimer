@@ -45,7 +45,8 @@ def _badge(level: str) -> str:
 TSV_COLS = ["Rank", "Anchor", "Tier", "Score", "Offset", "F_seq", "F_len",
             "F_Tm", "F_GC", "R_seq", "R_len", "R_Tm", "R_GC", "dTm",
             "HeteroDimer_dG", "Amplicon_bp", "BsaI_internal", "BsaI_plus",
-            "BsaI_minus", "Amplicon_GC", "MaxWin_GC", "Spec_level",
+            "BsaI_minus", "PaqCI_internal", "PaqCI_plus", "PaqCI_minus",
+            "Amplicon_GC", "MaxWin_GC", "Spec_level",
             "Spec_offtarget_products", "Template_advice", "PCR_advice",
             "Overall_risk", "Flags"]
 
@@ -54,7 +55,8 @@ def write_tsv(pairs: List, path: str) -> str:
     lines = ["\t".join(TSV_COLS)]
     for i, p in enumerate(pairs, 1):
         r = p.risk or {}
-        enz = r.get("enzyme", {})
+        enz = r.get("enzyme", {}) or {}
+        enz_gg = r.get("enzyme_gg", {}) or {}
         gc = r.get("gc", {})
         spec = r.get("specificity", {})
         pcr = (spec.get("detail") or {}).get("pcr", {})
@@ -69,6 +71,8 @@ def write_tsv(pairs: List, path: str) -> str:
             f"{p.tm_diff:.2f}", f"{p.hetero_dimer_dg:.1f}", p.amplicon_len,
             enz.get("n_total", "NA"), enz.get("n_plus", "NA"),
             enz.get("n_minus", "NA"),
+            enz_gg.get("n_total", "NA"), enz_gg.get("n_plus", "NA"),
+            enz_gg.get("n_minus", "NA"),
             f"{gc.get('overall', 0) * 100:.1f}" if gc else "NA",
             f"{gc.get('max_window', {}).get('gc', 0) * 100:.0f}" if gc else "NA",
             spec.get("level", "NA"), pcr.get("n_off", "NA"),
@@ -192,11 +196,40 @@ def _amp_body(amp: Dict, risk: Dict) -> str:
                           "standard high-fidelity PCR suffices.</li></ul>"))
 
 
+def _enz_section(enz: Dict) -> str:
+    """Render the internal type-IIS site table for one enzyme."""
+    if not enz:
+        return ""
+    rows = ""
+    for s in enz.get("sites", []):
+        fixes = "；".join(
+            f"{f['aa']}{f['codon_no']} {f['codon']}→{f['new_codon']} "
+            f"({f['from']}{f['amplicon_pos'] + 1}{f['to']})"
+            for f in s.get("fixes", [])[:2]) or \
+            '<span style="color:%s">no single-base synonymous fix</span>' % C_RED
+        rows += (f"<tr><td>{s['pos_1based']}</td><td>{s['strand']} strand</td>"
+                 f"<td><code>{_e(s['context'])}</code></td>"
+                 f"<td>{'in CDS, codon %d' % s['codon_no'] if s['in_cds'] else 'outside CDS'}</td>"
+                 f"<td>{fixes}</td></tr>")
+    body = f'<p>{_e(enz.get("message", ""))}</p>'
+    if rows:
+        body += (f'<table class="mini"><tr><th>Position (nt)</th><th>Strand</th>'
+                 f'<th>Context</th><th>Locus attribute</th>'
+                 f'<th>Synonymous-mutation rescue</th></tr>{rows}</table>')
+    audit = enz.get("construct_audit") or {}
+    if audit:
+        col = C_BLUE if audit.get("ok") else C_RED
+        body += (f'<p style="color:{col}">{_e(audit.get("message", ""))}'
+                 f'{"" if audit.get("ok") else " — assembly will fail; must be fixed"}</p>')
+    return body
+
+
 def _risk_block(pair) -> str:
     r = pair.risk or {}
     if not r:
         return ""
-    enz = r.get("enzyme", {})
+    enz = r.get("enzyme", {}) or {}
+    enz_gg = r.get("enzyme_gg", {}) or {}
     gc = r.get("gc", {})
     spec = r.get("specificity", {})
     det = spec.get("detail") or {}
@@ -236,28 +269,15 @@ def _risk_block(pair) -> str:
         spec_body = (f'<p class="warn">{_e(det.get("error", "Specificity search not performed"))}'
                      f'. <b>BLAST verification is required before the experiment.</b></p>')
 
-    # --- enzyme sites ---
-    enz_rows = ""
-    for s in enz.get("sites", []):
-        fixes = "；".join(
-            f"{f['aa']}{f['codon_no']} {f['codon']}→{f['new_codon']} "
-            f"({f['from']}{f['amplicon_pos'] + 1}{f['to']})"
-            for f in s.get("fixes", [])[:2]) or \
-            '<span style="color:%s">no single-base synonymous fix</span>' % C_RED
-        enz_rows += (f"<tr><td>{s['pos_1based']}</td><td>{s['strand']} strand</td>"
-                     f"<td><code>{_e(s['context'])}</code></td>"
-                     f"<td>{'in CDS, codon %d' % s['codon_no'] if s['in_cds'] else 'outside CDS'}</td>"
-                     f"<td>{fixes}</td></tr>")
-    enz_body = f'''<p>{_e(enz.get('message', ''))}</p>'''
-    if enz_rows:
-        enz_body += (f'<table class="mini"><tr><th>Position (nt)</th><th>Strand</th>'
-                     f'<th>Context</th><th>Locus attribute</th>'
-                     f'<th>Synonymous-mutation rescue</th></tr>{enz_rows}</table>')
-    audit = r.get("construct_audit") or {}
-    if audit:
-        col = C_BLUE if audit.get("ok") else C_RED
-        enz_body += (f'<p style="color:{col}">{_e(audit.get("message", ""))}'
-                     f'{"" if audit.get("ok") else " — assembly will fail; must be fixed"}</p>')
+    # --- enzyme sites (both BsaI for the seamless scheme and PaqCI for the
+    #     Golden Gate scheme; each scanned on both strands) ---
+    enz_body = (f'<h4 style="margin:6px 0 2px">Seamless cloning — '
+                f'{_e(enz.get("enzyme", "BsaI"))} internal sites</h4>'
+                + _enz_section(enz))
+    if enz_gg:
+        enz_body += (f'<h4 style="margin:12px 0 2px">Golden Gate — '
+                     f'{_e(enz_gg.get("enzyme", "PaqCI"))} internal sites</h4>'
+                     + _enz_section(enz_gg))
 
     # --- GC ---
     gc_body = (f'<p>Overall GC <b>{gc.get("overall", 0) * 100:.1f}%</b>; '
@@ -273,11 +293,13 @@ def _risk_block(pair) -> str:
     def sec(title, level, body):
         return (f'<div class="risk"><h4>{title} {_badge(level)}</h4>{body}</div>')
 
+    enz_level = _worst(enz.get("level", "LOW"), enz_gg.get("level", "LOW"))
+    n_both = enz.get("n_total", 0) + enz_gg.get("n_total", 0)
     return (sec("Risk 1 · Primer specificity", spec.get("level", "UNKNOWN"), spec_body)
             + sec("Risk 2 · Amplicon GC content", gc.get("level", "UNKNOWN"), gc_body)
-            + sec(f"Risk 3 · Internal {enz.get('enzyme', 'BsaI')} sites "
-                  f"({enz.get('n_total', 0)} total, both strands)",
-                  enz.get("level", "UNKNOWN"), enz_body)
+            + sec(f"Risk 3 · Internal type-IIS sites "
+                  f"({n_both} total across BsaI + PaqCI, both strands)",
+                  enz_level, enz_body)
             + sec("Risk 4 · Reading frame & terminal integrity",
                   frame.get("level", "UNKNOWN"),
                   "<ul>" + "".join(f"<li>{_e(i)}</li>"
@@ -460,7 +482,8 @@ def generate_report(*, tx, isoforms: List[Dict], pairs: List,
     for i, p in enumerate(pairs, 1):
         cls = "sel" if id(p) in sel_ids else ("anchor" if p.is_anchor else "")
         r = p.risk or {}
-        enz = r.get("enzyme", {})
+        enz = r.get("enzyme", {}) or {}
+        enz_gg = r.get("enzyme_gg", {}) or {}
         cand_rows += (
             f'<tr class="{cls}"><td>{i}{" ★" if p.is_anchor else ""}</td>'
             f'<td>{p.tier}</td><td>{p.offset:+d}</td>'
@@ -472,6 +495,7 @@ def generate_report(*, tx, isoforms: List[Dict], pairs: List,
             f'<td>{p.r_qc["gc"] * 100:.0f}</td>'
             f'<td>{p.tm_diff:.1f}</td><td>{p.amplicon_len}</td>'
             f'<td>{enz.get("n_total", "-")}</td>'
+            f'<td>{enz_gg.get("n_total", "-")}</td>'
             f'<td>{_badge(r.get("overall", "UNKNOWN")) if r else "-"}</td>'
             f'<td>{_e("; ".join(p.flags) or "OK")}</td></tr>')
 
@@ -522,11 +546,13 @@ tie-break by longer mRNA).</p>
 <p style="font-size:12.5px;color:#666">★ = standard anchor pair with strict ATG start / stop-codon
 end (mandated by the design spec to be present in candidates). Tier A = all SpacerFinder-derived
 filters pass; B = boundaries acceptable; C = needs trade-off. offset is the forward primer 5' shift
-relative to ATG, always a multiple of 3.</p>
+relative to ATG, always a multiple of 3. <b>BsaI</b> / <b>PaqCI</b> = number of internal
+type-IIS sites found inside the PCR product for the seamless (BsaI) and Golden Gate (PaqCI) schemes
+respectively — 0 in both is required for clean assembly.</p>
 <table><tr><th>#</th><th>Tier</th><th>offset</th>
 <th>Forward 5'→3'</th><th>nt</th><th>Tm</th><th>GC%</th>
 <th>Reverse 5'→3'</th><th>nt</th><th>Tm</th><th>GC%</th>
-<th>ΔTm</th><th>Product bp</th><th>Internal BsaI</th><th>Risk</th><th>Flags</th></tr>
+<th>ΔTm</th><th>Product bp</th><th>BsaI</th><th>PaqCI</th><th>Risk</th><th>Flags</th></tr>
 {cand_rows}</table>
 
 {'<h2>3. Standard anchor pair &amp; candidate risk assessment</h2>' + sel_html if sel_html else

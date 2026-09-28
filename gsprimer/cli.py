@@ -9,15 +9,17 @@ Examples
       --genome MSU_dna.fa --gff3 MSU.gff3 --blast-db MSU_dna_db \
       --outdir out
 
-  # design from a CDS FASTA, then pick pair #1 interactively
+  # design from a CDS FASTA, then pick the pair interactively and confirm
   python -m gsprimer.cli --gene LOC_Os01g01010 --cds MSU_cds.fa \
       --outdir out --interactive
 
-  # non-interactive: design and immediately finalize pair #1
-  python -m gsprimer.cli --gene X --sequence-file cds.fa --outdir out --select 1
-
-  # finalize later, reusing the cached design state
+  # finalize later, reusing the cached design state (lists the chosen primers
+  # and asks for confirmation BEFORE any adapter is attached)
   python -m gsprimer.cli --finalize --select 1,3 --outdir out
+
+  # scripted pipelines: skip the confirmation prompt with --yes
+  python -m gsprimer.cli --gene X --sequence-file cds.fa --outdir out \
+      --select 1 --yes
 """
 
 import argparse
@@ -26,7 +28,8 @@ import sys
 
 from .adapters import ADAPTER_F, ADAPTER_R, ADAPTER_SCHEMES
 from .config import get, set_config
-from .pipeline import candidate_table, run_design, run_finalize
+from .pipeline import (candidate_table, load_state, pairs_from_state,
+                       run_design, run_finalize)
 from .template import read_fasta
 
 
@@ -93,6 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="enter interactive selection after design")
     o.add_argument("--finalize", action="store_true",
                    help="skip design and finalize directly from cached state")
+    o.add_argument("--yes", action="store_true",
+                   help="skip the interactive primer-sequence confirmation "
+                        "prompt (attach adapters without asking; for scripts)")
 
     n = p.add_argument_group("Structure hints (optional, affects template advice)")
     n.add_argument("--no-intron", action="store_true",
@@ -119,10 +125,28 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.finalize:
-        if not args.select:
-            print("Error: --finalize requires --select", file=sys.stderr)
+        st = load_state(args.outdir)
+        if not st:
+            print(f"Error: design state not found in {args.outdir}; "
+                  f"run the design stage first", file=sys.stderr)
             return 2
-        sel = [int(x) for x in args.select.replace(" ", "").split(",") if x]
+        pairs = pairs_from_state(st)
+        if args.select:
+            sel = [int(x) for x in args.select.replace(" ", "").split(",") if x]
+        else:
+            # No explicit selection: present the list and ask the user to pick.
+            print(candidate_table(pairs))
+            from .interactive import ask_selection
+            sel = ask_selection(pairs)
+        bad = [i for i in sel if i < 1 or i > len(pairs)]
+        if bad:
+            print(f"Error: number {bad} out of range (1-{len(pairs)})",
+                  file=sys.stderr)
+            return 2
+        if not _confirm_primers(pairs, sel, args.yes):
+            print("Aborted: GS adapters were NOT attached; no order sheet "
+                  "written. Re-run with your confirmed selection when ready.")
+            return 0
         res = run_finalize(sel, outdir=args.outdir)
         if not res["ok"]:
             print(f"Error: {res['error']}", file=sys.stderr)
@@ -176,6 +200,11 @@ def main(argv=None) -> int:
         sel = ask_selection(res["pairs"])
 
     if sel:
+        if not _confirm_primers(res["pairs"], sel, args.yes):
+            print("Aborted: GS adapters were NOT attached. The design report "
+                  "above is still valid; finalize later once the primer "
+                  "sequences are confirmed.")
+            return 0
         fin = run_finalize(sel, outdir=args.outdir)
         if not fin["ok"]:
             print(f"Error: {fin['error']}", file=sys.stderr)
@@ -186,6 +215,41 @@ def main(argv=None) -> int:
         print(f"    python -m gsprimer.cli --finalize --select <N> "
               f"--outdir {args.outdir}")
     return 0
+
+
+def _confirm_primers(pairs, selection, yes: bool = False) -> bool:
+    """Show the selected primer CORE sequences and require explicit confirmation
+    before GS adapters are attached (the user must sign off on the actual
+    sequences, not just a candidate number)."""
+    print("\n" + "=" * 72)
+    print("PRIMER CONFIRMATION — review the sequences below")
+    print("=" * 72)
+    print("Adapters are NOT attached yet. Confirm these exact primer sequences:")
+    for i in selection:
+        p = pairs[i - 1]
+        r = p.risk or {}
+        enz = (r.get("enzyme", {}) or {})
+        enz_gg = (r.get("enzyme_gg", {}) or {})
+        print(f"\n[{i}] {p.label}   product {p.amplicon_len} bp   "
+              f"risk {r.get('overall', 'NA')}")
+        print(f"  F ({p.f_len} nt): {p.f_seq}")
+        print(f"  R ({p.r_len} nt): {p.r_seq}")
+        print(f"  anchor  F: {'ATG start' if p.offset == 0 else '%+d nt' % p.offset}"
+              f" | R: {'stop-codon end' if p.r_ext == 0 else '+%d nt past stop' % p.r_ext}")
+        print(f"  internal BsaI  sites: {enz.get('n_total', '?')} "
+              f"(+{enz.get('n_plus', '?')} / -{enz.get('n_minus', '?')})")
+        print(f"  internal PaqCI sites: {enz_gg.get('n_total', '?')} "
+              f"(+{enz_gg.get('n_plus', '?')} / -{enz_gg.get('n_minus', '?')})")
+    if yes:
+        print("\n  [--yes] confirmation skipped (adapters will be attached)")
+        return True
+    try:
+        ans = input("\nAttach GS adapters to the primer pair(s) above and write "
+                    "the order sheet? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[cancelled]")
+        return False
+    return ans in ("y", "yes")
 
 
 def _print_final(res: dict, scheme: str = "all") -> None:

@@ -19,6 +19,7 @@ Plus two practical extras that bite in real labs:
 import re
 from typing import Dict, List, Optional
 
+from .adapters import GG_SITE, GG_ENZYME
 from .thermo import gc_fraction, max_homopolymer, revcomp, TM_DIFF_MAX
 
 BSAI = "GGTCTC"
@@ -441,6 +442,10 @@ def assess(tx, pair, *, adapter_f: str = "", adapter_r: str = "",
 
     enz = enzyme_risk(pair.amplicon, cds_offset=cds_offset,
                       cds_len=cds_len, site=site, enzyme=enzyme)
+    # Golden Gate (PaqCI / AarI) internal-site scan on the same bare amplicon,
+    # so both cloning schemes are reported from the design stage onward.
+    enz_gg = enzyme_risk(pair.amplicon, cds_offset=cds_offset,
+                        cds_len=cds_len, site=GG_SITE, enzyme=GG_ENZYME)
     gc = gc_risk(pair.amplicon)
     amp = amplification_risk(tx, pair, no_intron=no_intron)
     pcr = pcr_advice(gc_overall=gc["overall"],
@@ -494,11 +499,11 @@ def assess(tx, pair, *, adapter_f: str = "", adapter_r: str = "",
         frame_issues.append("Strict ATG..STOP anchor; frame matches the vector "
                             "overhang")
 
-    overall = _worst(enz["level"], gc["level"], amp["level"], pcr["level"],
-                     spec_level, frame_level)
+    overall = _worst(enz["level"], enz_gg["level"], gc["level"], amp["level"],
+                     pcr["level"], spec_level, frame_level)
     return {
-        "enzyme": enz, "gc": gc, "amplification": amp, "pcr": pcr,
-        "construct_audit": audit,
+        "enzyme": enz, "enzyme_gg": enz_gg, "gc": gc, "amplification": amp,
+        "pcr": pcr, "construct_audit": audit,
         "specificity": {"level": spec_level, "detail": spec},
         "frame": {"level": frame_level, "issues": frame_issues},
         "overall": overall,

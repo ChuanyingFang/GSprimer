@@ -57,8 +57,18 @@ python -m gsprimer.cli --gene LOC_Os01g01010 \
 # (review the candidate table, pick pair N)
 
 # Stage 2 — attach GS adapters, emit order sheet + final report
+#   GSprimer lists the chosen primer CORE sequences and asks you to confirm
+#   BEFORE any adapter is attached. Answer 'y' to proceed.
 python -m gsprimer.cli --finalize --select 1 --outdir out
+#   scripted pipelines: skip the prompt with --yes
+python -m gsprimer.cli --finalize --select 1 --outdir out --yes
 ```
+
+> **Confirmation is mandatory.** GSprimer never attaches adapters until you
+> have reviewed the exact primer sequences it is about to order. At Stage 2 it
+> prints the selected F/R core sequences (with anchoring and the internal
+> BsaI / PaqCI site counts) and waits for an explicit `y` confirmation. Use
+> `--yes` only in automated pipelines where the selection is already vetted.
 
 ### Three template input modes
 
@@ -74,7 +84,8 @@ python -m gsprimer.cli --finalize --select 1 --outdir out
 ```bash
 python -m gsprimer.cli --gene DEMO_G1.1 \
     --cds tests/demo_data/demo_cds.fa --outdir out_demo --no-blast
-python -m gsprimer.cli --finalize --select 1 --outdir out_demo
+# --yes bypasses the interactive primer confirmation (use it in this headless demo)
+python -m gsprimer.cli --finalize --select 1 --outdir out_demo --yes
 ```
 
 ---
@@ -181,7 +192,8 @@ runs → design around them.
 | `--no-intron` | declare the gene is intronless → report recommends gDNA |
 | `--has-introns` | declare the gene has introns → force cDNA template |
 | `--adapter-f / --adapter-r` | override GS adapters |
-| `--select / --finalize` | choose pair(s) and attach adapters |
+| `--select / --finalize` | choose pair(s); Stage 2 then lists the primers and asks for confirmation before attaching adapters |
+| `--yes` | skip the interactive confirmation prompt (adapters attached without asking; scripting only) |
 | `--scheme` | terminal print filter: `all` (default, both sets), `seamless`, or `golden_gate` |
 
 ---
