@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: Smoke test (no BLAST, demo CDS)
+        run: |
+          python -m gsprimer.cli --gene DEMO_G1.1 \
+            --cds tests/demo_data/demo_cds.fa --outdir tests/out_ci --no-blast
+          python -m gsprimer.cli --finalize --select 1 --outdir tests/out_ci
+          test -f tests/out_ci/DEMO_G1.1_GSprimer_final.html
+          test -f tests/out_ci/DEMO_G1.1_order.tsv
+      - name: Clean up CI output
+        if: always()
+        run: rm -rf tests/out_ci

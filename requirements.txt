@@ -1,0 +1,7 @@
+# GSprimer has no hard dependencies for the core design pipeline.
+# BLAST+ is optional (used only for specificity checks when installed).
+#
+# Optional, used automatically if present:
+#   pyyaml        # nicer config-file parsing (pure-Python fallback otherwise)
+#
+# Runtime: Python >= 3.8

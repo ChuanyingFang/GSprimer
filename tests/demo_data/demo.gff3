@@ -1,0 +1,14 @@
+##gff-version 3
+chrD1	demo	gene	501	1927	.	+	.	ID=DEMO_G1;Name=DEMO_G1
+chrD1	demo	mRNA	501	1927	.	+	.	ID=DEMO_G1.1;Parent=DEMO_G1
+chrD1	demo	exon	501	1070	.	+	.	ID=DEMO_G1.1:e1;Parent=DEMO_G1.1
+chrD1	demo	exon	1271	1927	.	+	.	ID=DEMO_G1.1:e2;Parent=DEMO_G1.1
+chrD1	demo	CDS	621	1070	.	+	0	ID=DEMO_G1.1:c1;Parent=DEMO_G1.1
+chrD1	demo	CDS	1271	1717	.	+	0	ID=DEMO_G1.1:c2;Parent=DEMO_G1.1
+chrD1	demo	mRNA	501	1070	.	+	.	ID=DEMO_G1.2;Parent=DEMO_G1
+chrD1	demo	exon	501	1070	.	+	.	ID=DEMO_G1.2:e1;Parent=DEMO_G1.2
+chrD1	demo	CDS	621	1073	.	+	0	ID=DEMO_G1.2:c1;Parent=DEMO_G1.2
+chrD2	demo	gene	401	1361	.	-	.	ID=DEMO_G2;Name=DEMO_G2
+chrD2	demo	mRNA	401	1361	.	-	.	ID=DEMO_G2.1;Parent=DEMO_G2
+chrD2	demo	exon	401	1361	.	-	.	ID=DEMO_G2.1:e1;Parent=DEMO_G2.1
+chrD2	demo	CDS	561	1286	.	-	0	ID=DEMO_G2.1:c1;Parent=DEMO_G2.1
