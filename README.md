@@ -33,7 +33,7 @@ one that matches your destination vector.
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/GSprimer.git
+git clone https://github.com/ChuanyingFang/GSprimer.git
 cd GSprimer
 pip install -e .
 ```

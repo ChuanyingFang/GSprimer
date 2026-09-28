@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/GSprimer"
-Repository = "https://github.com/your-org/GSprimer"
-Issues = "https://github.com/your-org/GSprimer/issues"
+Homepage = "https://github.com/ChuanyingFang/GSprimer"
+Repository = "https://github.com/ChuanyingFang/GSprimer"
+Issues = "https://github.com/ChuanyingFang/GSprimer/issues"
 
 [project.scripts]
 gsprimer = "gsprimer.cli:main"
