@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GSprimer"
-version = "1.1.0"
-description = "CDS-amplification primer design for GS / Golden Gate (BsaI/PaqCI) vector cloning"
+version = "2.0.0"
+description = "CDS / promoter amplification primer design for GS / Golden Gate (BsaI/PaqCI) vector cloning"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }

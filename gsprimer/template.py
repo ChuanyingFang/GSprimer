@@ -8,6 +8,10 @@ Builds a unified `Transcript` model from any of three input modes:
   2. FASTA mode  : cDNA and/or CDS multi-FASTA, looked up by ID
   3. Direct mode : a raw sequence string / single FASTA file
 
+A fourth construction, `from_promoter`, builds a promoter-mode Transcript used
+by the v2.0 promoter-amplification workflow (upstream 2 kb + optional 5'-UTR
+fallback). Promoter mode carries no ORF; TSS is marked by `utr5_start`.
+
 Coordinate conventions
 ----------------------
   * `mrna` is the mature transcript, already in 5'->3' sense orientation.
@@ -91,7 +95,9 @@ class Transcript:
     cds_start: int = 0          # 0-based index into mrna (A of ATG)
     cds_end: int = 0            # 0-based exclusive, past the stop codon
     exons: List[Tuple[int, int]] = field(default_factory=list)  # biological order
-    source: str = ""            # gff3 | cdna | cds | direct
+    source: str = ""            # gff3 | cdna | cds | direct | promoter
+    mode: str = "cds"           # "cds" | "promoter"
+    utr5_start: int = 0         # 0-based TSS position within mrna (promoter mode)
     notes: List[str] = field(default_factory=list)
 
     # ---------- derived ----------
@@ -116,7 +122,9 @@ class Transcript:
         return max(0, self.cds_len // 3 - 1)
 
     def validate(self) -> List[str]:
-        """Structural sanity checks on the ORF."""
+        """Structural sanity checks; branches on CDS vs promoter mode."""
+        if self.mode == "promoter":
+            return self._validate_promoter()
         msgs = []
         cds = self.cds
         if not cds:
@@ -135,6 +143,17 @@ class Transcript:
                         f"codon(s) (first at codon {internal[0] // 3 + 1})")
         if "N" in cds:
             msgs.append(f"CDS contains {cds.count('N')} ambiguous base(s)")
+        return msgs
+
+    def _validate_promoter(self) -> List[str]:
+        """Light structural checks for promoter mode (non-coding, ORF-free)."""
+        msgs = []
+        if not (0 <= self.utr5_start <= len(self.mrna)):
+            msgs.append(f"TSS position {self.utr5_start} is outside the sequence "
+                        f"(length {len(self.mrna)})")
+        if self.utr5_start < 200:
+            msgs.append("Upstream promoter sequence is short (<200 nt); the "
+                        "1200–1700 bp product window may not be satisfiable")
         return msgs
 
     def mrna_to_genome(self, idx: int) -> int:
@@ -302,7 +321,7 @@ class Annotation:
             if mrna[cds_end:cds_end + 3] in STOP_CODONS:
                 tx.cds_end = cds_end + 3
                 tx.notes.append("CDS annotation lacks a stop codon; "
-                                 "auto-extended 3 nt downstream")
+                                "auto-extended 3 nt downstream")
         _ = stop_g
         return tx
 
@@ -379,6 +398,44 @@ def from_cdna_fasta(path: str, query: str) -> List[Transcript]:
             notes=["template from cDNA FASTA: ORF inferred from longest "
                    "ATG..stop"]))
     return out
+
+
+def utr5_from_transcript(seq: str) -> str:
+    """Extract the 5'-UTR (sequence before the CDS) from a cDNA/mRNA string.
+
+    Used by the promoter-mode UTR fallback: when no ideal R primer is found
+    within the 2 kb upstream region, up to 200 nt are taken from here to extend
+    the R primer's 5' end into the 5'-UTR.
+    """
+    s = "".join(seq.split()).upper().replace("U", "T")
+    cs, _ce = longest_orf(s)
+    if cs < 0:
+        return ""
+    return s[:cs]
+
+
+def from_promoter(upstream_seq: str, utr5_seq: str = "") -> Transcript:
+    """Build a promoter-mode Transcript.
+
+    `upstream_seq` is the promoter region upstream of the TSS (typically 2 kb,
+    5'->3' on the sense strand, its tail being the TSS); `utr5_seq` is the
+    5'-UTR from the transcript (optional, used only for the UTR fallback when no
+    ideal R primer sits within the 2 kb). The two are concatenated into `mrna`,
+    with the TSS at the join.
+    """
+    up = "".join(upstream_seq.split()).upper().replace("U", "T")
+    utr = "".join(utr5_seq.split()).upper().replace("U", "T")
+    mrna = up + utr
+    notes = [f"promoter mode: upstream region {len(up)} bp, UTR fallback "
+             f"{len(utr)} bp"]
+    if not utr:
+        notes.append("no UTR sequence supplied; R primer cannot fall back into "
+                     "the 5'-UTR (only upstream extension within the promoter "
+                     "region is allowed)")
+    return Transcript(tx_id="promoter", gene_id="promoter", chrom="", strand="+",
+                     mrna=mrna, cds_start=len(up), cds_end=len(mrna),
+                     source="promoter", mode="promoter",
+                     utr5_start=len(up), notes=notes)
 
 
 def longest_orf(seq: str) -> Tuple[int, int]:

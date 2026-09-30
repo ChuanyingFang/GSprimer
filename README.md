@@ -1,11 +1,18 @@
 # GSprimer
 
-**CDS-amplification primer design for GS / Golden Gate (BsaI & PaqCI) vector cloning.**
+**CDS / promoter amplification primer design for GS / Golden Gate (BsaI & PaqCI) vector cloning.**
 
-GSprimer designs primers that amplify a full coding sequence (CDS) so it can be
-cloned into a **Golden Gate / GS-type vector**. The forward primer is anchored at
-the **ATG** and the reverse primer at the **stop codon**, with the reading frame
-held on a 3-nt grid, so the translated protein comes out complete.
+GSprimer designs primers that amplify a full coding sequence (CDS) **or the
+region upstream of a transcription start site (promoter / functional element)**
+so it can be cloned into a **Golden Gate / GS-type vector**.
+
+- **CDS mode** — the forward primer is anchored at the **ATG** and the reverse
+  primer at the **stop codon**, with the reading frame held on a 3-nt grid, so the
+  translated protein comes out complete.
+- **Promoter mode (v2.0)** — the reverse primer is anchored at the **TSS**
+  (1 nt before the 5′-UTR start); the forward primer is placed so the PCR product
+  lands in a 1200–1700 bp window, with a two-file fallback into the transcript
+  5′-UTR when no ideal R exists in the upstream region.
 
 At finalize time GSprimer always emits **both** adapter schemes — a scarless
 **BsaI** scheme and a **Golden Gate (PaqCI / AarI)** scheme — so you can pick the
@@ -114,28 +121,56 @@ Thermodynamic rules are cloned verbatim from SpacerFinder:
 The candidate set **always includes the strict ATG..stop pair** (flagged
 `★ standard anchor pair`).
 
+### Promoter mode (v2.0)
+
+Amplify the region **upstream of the TSS** (promoter / enhancer / other functional
+element) instead of a CDS. Invoke with `--promoter` (a ~2 kb upstream sequence
+whose 3′ end is the TSS) and, optionally, `--utr5` (the transcript 5′-UTR, used
+only as a fallback):
+
+```bash
+python -m gsprimer.cli --promoter upstream_2k.fa --utr5 utr5.fa \
+    --product-min 1200 --product-max 1700 --outdir out
+```
+
+**Anchoring rules**
+
+- **Reverse primer** — 5′ end anchored at the **TSS** (1 nt before the 5′-UTR
+  start). If no ideal R exists there, it may:
+  - extend **≤ 100 nt upstream** of the 5′-UTR (into the promoter region), or
+  - fall back **≤ 200 nt into the 5′-UTR** (using the `--utr5` transcript
+    sequence) when the 2 kb upstream region yields no Tier A/B R.
+- **Forward primer** — placed so the PCR product lands in the **1200–1700 bp**
+  window; there is no reading frame in non-coding sequence.
+- The candidate set **always includes the TSS-anchored pair** (flagged
+  `★` in the report).
+
+**Two-file strategy:** GSprimer first scans the upstream region for R; it only
+falls back to the transcript 5′-UTR when no Tier A/B R is found there, keeping the
+product as close to the native promoter as possible.
+
 ---
 
 ## Two compatible cloning schemes
 
 Both schemes share the **same GS destination vector**: they generate identical
-4-nt sticky ends (`cgag` left / `ggat` right), differing only in the type-IIS
+4-nt sticky ends (`attc` left / `gagc` right), differing only in the type-IIS
 enzyme. At finalize time **both** sets are attached and listed so you choose
 which to order.
 
 **Scarless / BsaI (GGTCTC, 1/5 cut)**
 
-- Forward: `gtgatatcAGGTCTCTcgag`
-- Reverse: `gccgcgggTGGTCTCAatcc`
+- Forward: `gataagcttGGTCTCTattc`
+- Reverse: `CATggatccGGTCTCAgctc`
 
 **Golden Gate / PaqCI–AarI (CACCTGC, 4/8 cut)**
 
-- Forward: `agCACCTGCagtccgag`
-- Reverse: `agCACCTGCagtcatcc`
+- Forward: `agCACCTGCagtcattc`
+- Reverse: `agCACCTGCagtgctc`
 
-> Note: the Golden Gate adapter leaves only 2 nt of 5′ protection upstream of
-> `CACCTGC`; the report flags this (recommended ≥ 6 nt) but the sticky ends are
-> correct and compatible.
+> Both adapters carry ample 5′ protection, so the type-IIS sites are digested
+> cleanly. The seamless and Golden Gate sets emit the **same** 4-nt sticky ends
+> (`attc` / `gagc`), so either order drops into the same destination vector.
 
 ---
 
@@ -184,6 +219,11 @@ runs → design around them.
 | `--gff3 --genome` | annotation + genome FASTA |
 | `--cdna / --cds` | cDNA / CDS multi-FASTA |
 | `--sequence / --sequence-file` | raw sequence |
+| `--promoter / --promoter-file` | upstream promoter region (3′ end = TSS), mutually exclusive with `--gene/--sequence` |
+| `--utr5 / --utr5-file` | optional transcript 5′-UTR fallback for promoter mode |
+| `--product-min / --product-max` | PCR product window for promoter mode (default 1200 / 1700) |
+| `--r-up-max` | max nt the R 5′ end may extend upstream of the TSS in promoter mode (default 100) |
+| `--r-utr-max` | max nt R may extend into the 5′-UTR fallback (default 200) |
 | `--max-shift` | max \|offset\| for the forward primer (multiple of 3) |
 | `--top` | number of candidate pairs (default 10) |
 | `--blast-db / --blastn` | BLAST database + executable |
@@ -219,6 +259,13 @@ res = run_design("LOC_Os01g01010", cds_fa="MSU_cds.fa", outdir="out")
 fin = run_finalize([1], outdir="out")
 print(fin["html"])   # final report path
 print(fin["order"])  # order sheet path
+```
+
+```python
+# Promoter mode: amplify the 2 kb upstream region (TSS at its 3' end),
+# with the transcript 5'-UTR as an optional fallback for the reverse primer.
+res = run_design("GeneX", promoter_seq=upstream_2k, utr5_seq=utr5, outdir="out")
+fin = run_finalize([1], outdir="out")
 ```
 
 ---
