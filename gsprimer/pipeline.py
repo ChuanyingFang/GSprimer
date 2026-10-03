@@ -25,10 +25,10 @@ from . import risk as R
 from .adapters import (ADAPTER_F, ADAPTER_R, order_sheet, ADAPTER_SCHEMES,
                        GG_SITE, GG_ENZYME)
 from .config import get
-from .design import PrimerPair, design, design_promoter, summarize_isoforms
+from .design import PrimerPair, design, summarize_isoforms
 from .report import generate_report, write_tsv
 from .template import (Transcript, load_transcripts, pick_longest,
-                       read_fasta, from_promoter)
+                       read_fasta)
 
 STATE_NAME = "gsprimer_state.json"
 
@@ -46,31 +46,16 @@ def run_design(query: str, *, genome_fa: str = "", gff3: str = "",
                transcript: str = "", outdir: str = ".",
                prefix: str = "", max_shift: int = 12, r_ext_max: int = 0,
                top_n: int = 10, allow_downstream: bool = True,
-               blastn: str = "", blast_db: str = "",
+               blastn: str = "", blast_db: str = "", blast_db_cdna: str = "",
                fallback_fasta: str = "", do_blast: bool = True,
                adapter_f: str = ADAPTER_F, adapter_r: str = ADAPTER_R,
                enzyme: str = "BsaI", site: str = "GGTCTC",
                no_intron: Optional[bool] = None,
-               longest_by: str = "cds",
-               # ---- promoter mode (v2.0) ----
-               promoter_seq: str = "", utr5_seq: str = "",
-               product_min: int = 1200, product_max: int = 1700,
-               r_up_max: int = 100, r_utr_max: int = 200) -> Dict:
+               longest_by: str = "cds") -> Dict:
     """Enumerate candidates, run specificity + risk, write report/TSV/state."""
     t0 = time.time()
     os.makedirs(outdir, exist_ok=True)
     prefix = prefix or (query or "gsprimer").replace(":", "_")
-
-    is_promo = bool(promoter_seq)
-    if is_promo:
-        return _run_design_promoter(
-            query=query, promoter_seq=promoter_seq, utr5_seq=utr5_seq,
-            outdir=outdir, prefix=prefix, top_n=top_n,
-            blastn=blastn, blast_db=blast_db, fallback_fasta=fallback_fasta,
-            do_blast=do_blast, adapter_f=adapter_f, adapter_r=adapter_r,
-            enzyme=enzyme, site=site,
-            product_min=product_min, product_max=product_max,
-            r_up_max=r_up_max, r_utr_max=r_utr_max)
 
     # ---- template ----
     txs, mode = load_transcripts(
@@ -113,6 +98,17 @@ def run_design(query: str, *, genome_fa: str = "", gff3: str = "",
     # ---- specificity for EVERY candidate (spec requirement) ----
     blastn = blastn or get("blastn")
     blast_db = blast_db or get("blast_db")
+    blast_db_cdna = blast_db_cdna or get("blast_db_cdna")
+    # A genomic BLAST DB cannot yield the cDNA-sized on-target amplicon when the
+    # gene is spliced: the gDNA product carries the introns, so it can never
+    # match `expect_len` and in-silico PCR would flag the target locus itself as
+    # a perfect OFF-target product (-> specificity HIGH). When the transcript is
+    # known to be multi-exon and a transcriptome DB is available, search that
+    # instead so the on-target product is recognisable.
+    if blast_db_cdna and len(tx.exons) > 1 and blast_db_cdna != blast_db:
+        _log(f"[Spec] multi-exon gene ({len(tx.exons)} exons): in-silico PCR "
+             f"switched to transcriptome DB -> {blast_db_cdna}")
+        blast_db = blast_db_cdna
     fb: Optional[Dict[str, str]] = None
     if fallback_fasta and os.path.exists(fallback_fasta):
         _log(f"[Spec] loaded local FASTA as specificity search DB: "
@@ -129,10 +125,20 @@ def run_design(query: str, *, genome_fa: str = "", gff3: str = "",
             if key in cache:
                 p.blast = cache[key]
                 continue
+            # Expected in-silico PCR size = distance between the two 3' bases,
+            # inclusive:
+            #   F 3' base at sense index f_start + f_len - 1
+            #   R 3' base at sense index r_end  - r_len   (the R primer's 3' end
+            #       pairs with the 5'-most base of its sense footprint)
+            #   => L - f_len - r_len + 2   with L = amplicon_len
+            # Verified numerically against BLAST three_prime_pos on the cDNA DB
+            # (LOC_Os01g59530: 564 - 21 - 24 + 2 = 521 = reported product size).
             p.blast = B.check_pair(p.f_seq, p.r_seq, blastn=blastn,
                                    db=blast_db, fallback_db=fb,
                                    expect_len=p.amplicon_len
-                                   - (p.f_len - 1) - (p.r_len - 1))
+                                   - (p.f_len - 1) - (p.r_len - 1),
+                                   target_gene=(tx.gene_id
+                                                or tx.tx_id.split(".")[0]))
             cache[key] = p.blast
             _log(f"  [{i}/{len(pairs)}] {p.label} -> "
                  f"{p.blast.get('level', 'NA')}")
@@ -160,7 +166,7 @@ def run_design(query: str, *, genome_fa: str = "", gff3: str = "",
         "ΔTm cap": "< 2 °C (inherited)",
         "Hairpin/dimer ΔG": "≥ -4.0 / ≥ -6.0 kcal·mol⁻¹ (3' end -5.0, inherited)",
         "Amplicon size limit": "none (fixed by full CDS length; the one "
-                              "deviation from SpacerFinder)",
+                               "deviation from SpacerFinder)",
         "Forward anchor": f"ATG start, ±{max_shift} nt shift allowed, must be "
                           f"a multiple of 3",
         "Reverse anchor": f"stop codon end, 3' UTR extension cap {r_ext_max} nt",
@@ -197,128 +203,6 @@ def run_design(query: str, *, genome_fa: str = "", gff3: str = "",
             "state": state_path, "template_issues": issues}
 
 
-def _run_design_promoter(*, query: str, promoter_seq: str, utr5_seq: str = "",
-                         outdir: str, prefix: str, top_n: int,
-                         blastn: str, blast_db: str, fallback_fasta: str,
-                         do_blast: bool, adapter_f: str, adapter_r: str,
-                         enzyme: str, site: str,
-                         product_min: int, product_max: int,
-                         r_up_max: int, r_utr_max: int) -> Dict:
-    """Promoter-mode design (v2.0): two-file input — 2 kb upstream + transcript
-    UTR fallback."""
-    t0 = time.time()
-    os.makedirs(outdir, exist_ok=True)
-    prefix = prefix or (query or "gsprimer_promoter").replace(":", "_")
-
-    tx = from_promoter(promoter_seq, utr5_seq)
-    _log(f"[Template] promoter mode   upstream={len(promoter_seq)} bp  "
-         f"UTR fallback={len(utr5_seq)} bp  TSS@{tx.utr5_start}")
-    issues = tx.validate()
-    for m in issues:
-        _log(f"  [!] {m}")
-
-    pairs = design_promoter(tx, product_min=product_min, product_max=product_max,
-                           r_up_max=r_up_max, r_utr_max=r_utr_max, top_n=top_n)
-    if not pairs:
-        return {"ok": False,
-                "error": "Could not build any primer pair within the 1200–1700 bp "
-                         "product window; try relaxing --r-up-max / --r-utr-max "
-                         "or check the upstream sequence length"}
-    _log(f"[Design] {len(pairs)} candidate pairs "
-         f"(Tier A={sum(1 for p in pairs if p.tier == 'A')}, "
-         f"B={sum(1 for p in pairs if p.tier == 'B')}, "
-         f"C={sum(1 for p in pairs if p.tier == 'C')})")
-    r_in_utr = sum(1 for p in pairs if p.r_in_utr)
-    if r_in_utr:
-        _log(f"  [i] {r_in_utr} pairs used the transcript UTR fallback "
-             f"(no ideal R within the 2 kb)")
-
-    # ---- specificity ----
-    blastn = blastn or get("blastn")
-    blast_db = blast_db or get("blast_db")
-    fb: Optional[Dict[str, str]] = None
-    if fallback_fasta and os.path.exists(fallback_fasta):
-        _log(f"[Spec] loaded local FASTA as specificity search DB: "
-             f"{fallback_fasta}")
-        fb = read_fasta(fallback_fasta)
-    if do_blast:
-        usable = B.blast_available(blastn, blast_db) or bool(fb)
-        if not usable:
-            _log("[Spec] no usable BLAST DB found; skipping specificity "
-                 "search (report will mark it UNVERIFIED)")
-        cache: Dict[Tuple[str, str], Dict] = {}
-        for i, p in enumerate(pairs, 1):
-            key = (p.f_seq, p.r_seq)
-            if key in cache:
-                p.blast = cache[key]
-                continue
-            p.blast = B.check_pair(p.f_seq, p.r_seq, blastn=blastn,
-                                   db=blast_db, fallback_db=fb,
-                                   expect_len=p.amplicon_len
-                                   - (p.f_len - 1) - (p.r_len - 1))
-            cache[key] = p.blast
-            _log(f"  [{i}/{len(pairs)}] {p.label} -> "
-                 f"{p.blast.get('level', 'NA')}")
-
-    # ---- risk ----
-    for p in pairs:
-        sheet = order_sheet(p, adapter_f, adapter_r)
-        p.risk = R.assess(tx, p, adapter_f=adapter_f, adapter_r=adapter_r,
-                          full_product=sheet["construct"].full_product,
-                          enzyme=enzyme, site=site, no_intron=None)
-
-    isoforms = [{
-        "transcript": "promoter", "mRNA_len": len(tx.mrna),
-        "CDS_len": "-", "protein_aa": "-", "utr5": tx.utr5_start,
-        "utr3": "-", "exons": "-",
-        "issues": "; ".join(tx.validate()) or "OK",
-    }]
-    intron_cn = "promoter region (must use gDNA template)"
-    params = {
-        "Query": query, "Template mode": "promoter (promoter amplification)",
-        "Upstream promoter region": f"{len(promoter_seq)} bp",
-        "UTR fallback sequence": f"{len(utr5_seq)} bp (from transcript, used "
-                                f"only when no ideal R within the 2 kb)",
-        "Primer length": "19-24 nt (inherited from SpacerFinder)",
-        "GC range": "40-60% (inherited)", "Tm range": "55-60 °C (inherited)",
-        "ΔTm cap": "< 2 °C (inherited)",
-        "R anchor rule": "5' end precisely anchored at TSS; if not ideal, extend "
-                         "upstream (≤%d nt) or into 5'-UTR (≤%d nt)" % (r_up_max, r_utr_max),
-        "Product window": f"{product_min}–{product_max} bp (forward primer chosen "
-                         f"accordingly)",
-        "F adapter": adapter_f, "R adapter": adapter_r,
-        "Assembly enzyme": f"{enzyme} ({site}) / PaqCI (CACCTGC)",
-        "Specificity search": (pairs[0].blast.get("method", "not performed")
-                               if pairs and pairs[0].blast else "not performed"),
-        "BLAST DB": blast_db or fallback_fasta or "not configured",
-        "Template advice": intron_cn,
-    }
-
-    html_path = os.path.join(outdir, f"{prefix}_GSprimer.html")
-    tsv_path = os.path.join(outdir, f"{prefix}_GSprimer.tsv")
-    write_tsv(pairs, tsv_path)
-    generate_report(tx=tx, isoforms=isoforms, pairs=pairs, selected=[],
-                    params=params, out_path=html_path, gene_query=query,
-                    adapter_f=adapter_f, adapter_r=adapter_r)
-
-    state = {
-        "query": query, "mode": "promoter", "tx": _tx_to_dict(tx),
-        "isoforms": isoforms, "params": params,
-        "pairs": [_pair_to_dict(p) for p in pairs],
-        "adapter_f": adapter_f, "adapter_r": adapter_r,
-        "enzyme": enzyme, "site": site, "prefix": prefix,
-        "html": html_path, "tsv": tsv_path,
-    }
-    state_path = os.path.join(outdir, STATE_NAME)
-    with open(state_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=1)
-
-    _log(f"[Done] {time.time() - t0:.1f}s  report: {html_path}")
-    return {"ok": True, "tx": tx, "pairs": pairs, "isoforms": isoforms,
-            "params": params, "html": html_path, "tsv": tsv_path,
-            "state": state_path, "template_issues": issues}
-
-
 # ============================================================
 # Stage 2 — finalize
 # ============================================================
@@ -328,7 +212,7 @@ def run_finalize(selection: List[int], *, outdir: str = ".",
     """Attach GS adapters to the user-selected pair(s) and rebuild the report."""
     state_path = state_path or os.path.join(outdir, STATE_NAME)
     if not os.path.exists(state_path):
-        return {"ok": False, "error": f"design state file {state_path} not found; "
+        return {"ok": False,                 "error": f"design state file {state_path} not found; "
                          f"run the design stage first"}
     with open(state_path, encoding="utf-8") as f:
         st = json.load(f)
@@ -368,27 +252,18 @@ def run_finalize(selection: List[int], *, outdir: str = ".",
                 "GC_core\tNote\n")
         for i, p in enumerate(selected, 1):
             ss = scheme_sheets[pairs.index(p) + 1]
-            is_promo = getattr(p, "mode", "cds") == "promoter"
             for k, s in ss.items():
                 sc = ADAPTER_SCHEMES[k]
-                if is_promo:
-                    r_note = ("R precisely anchored at TSS" if p.offset == 0 else
-                              ("R extended %d nt upstream of 5'-UTR" % (-p.offset)
-                               if p.offset < 0 else
-                               "R extended %d nt into 5'-UTR (fallback)" % p.offset))
-                    f_note = r_note
-                else:
-                    f_note = 'ATG start' if p.offset == 0 else 'offset%+d' % p.offset
-                    r_note = ('stop codon end' if p.r_ext == 0
-                              else 'stop+%dnt' % p.r_ext)
                 f.write(f"{st['prefix']}-{i}-{sc['key']}-F\t{sc['key']}\t"
                         f"{sc['enzyme']}\t{s['F_full']}\t{s['F_len']}\t"
                         f"{p.f_qc['tm']:.1f}\t{p.f_qc['gc'] * 100:.1f}\t"
-                        f"{sc['name']}+{f_note}\n")
+                        f"{sc['name']}+"
+                        f"{'ATG start' if p.offset == 0 else 'offset%+d' % p.offset}\n")
                 f.write(f"{st['prefix']}-{i}-{sc['key']}-R\t{sc['key']}\t"
                         f"{sc['enzyme']}\t{s['R_full']}\t{s['R_len']}\t"
                         f"{p.r_qc['tm']:.1f}\t{p.r_qc['gc'] * 100:.1f}\t"
-                        f"{sc['name']}+{r_note}\n")
+                        f"{sc['name']}+"
+                        f"{'stop codon end' if p.r_ext == 0 else 'stop+%dnt' % p.r_ext}\n")
 
     _log(f"[Final] report: {html_path}\n[Final] order sheet: {order_path}")
     return {"ok": True, "html": html_path, "order": order_path,

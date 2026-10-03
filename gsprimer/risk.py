@@ -11,9 +11,8 @@ Three mandatory risk blocks (per skill spec):
                                mutation rescue when a site falls inside the CDS
 
 Plus two practical extras that bite in real labs:
-  4. template choice (cDNA vs gDNA) — for CDS mode the template is a transcript,
-     so genomic DNA would carry introns; for promoter mode the region is upstream
-     of the TSS and is present ONLY in gDNA.
+  4. template choice (cDNA vs gDNA) — the template here is a transcript, so
+     genomic DNA would carry introns
   5. amplification difficulty (length, homopolymer, repeats)
 """
 
@@ -234,17 +233,10 @@ def amplification_risk(tx, pair, *, no_intron: Optional[bool] = None) -> Dict:
       None  : unknown (CDS/cDNA/direct input, no genome annotation)
     Pass `no_intron=True` to force the single-exon (gDNA-friendly) branch
     for FASTA / direct inputs where exon structure is not in the data.
-
-    Promoter mode bypasses the intron logic entirely: the amplified region sits
-    upstream of the TSS and exists only in genomic DNA.
     """
     issues = []
     level = "LOW"
     n = pair.amplicon_len
-
-    # ---- promoter mode: region is upstream of TSS, present only in gDNA ----
-    if getattr(tx, "mode", "cds") == "promoter":
-        return _amp_promoter(pair)
 
     # ---- exon / intron status ----
     if no_intron is not None:
@@ -326,53 +318,6 @@ def amplification_risk(tx, pair, *, no_intron: Optional[bool] = None) -> Dict:
 
     return {"level": level, "issues": issues, "amplicon_len": n,
             "n_exons": n_exon, "has_introns": has_introns,
-            "template_advice": template_advice}
-
-
-def _amp_promoter(pair) -> Dict:
-    """Amplification / template assessment for promoter amplification.
-
-    The promoter region lies upstream of the TSS and exists only in genomic DNA
-    (cDNA has no such region), so the template MUST be gDNA (no reverse
-    transcription). There is no intron concept (non-transcribed region).
-    """
-    issues = []
-    level = "LOW"
-    n = pair.amplicon_len
-    if n > 3000:
-        issues.append(f"Amplicon {n} bp — needs a long-fragment high-fidelity "
-                      "polymerase (e.g. KOD FX / PrimeSTAR GXL) with "
-                      "~1 min/kb extension")
-        level = "MEDIUM"
-    elif n > 2000:
-        issues.append(f"Amplicon {n} bp — use a high-fidelity polymerase and "
-                      "extend the extension time")
-    if n < 150:
-        issues.append(f"Amplicon is only {n} bp — keep it distinct from primer "
-                      "dimers")
-        level = "MEDIUM"
-    homo_f = max_homopolymer(pair.f_seq)
-    homo_r = max_homopolymer(pair.r_seq)
-    if max(homo_f, homo_r) >= 5:
-        issues.append(f"Primer has a {max(homo_f, homo_r)}-nt homopolymer run, "
-                      "which may cause slippage")
-        level = "MEDIUM"
-    amp_homo = max_homopolymer(pair.amplicon)
-    if amp_homo >= 10:
-        issues.append(f"A {amp_homo}-nt homopolymer run inside the amplicon will "
-                      "add read-length noise in sequencing")
-    if not issues:
-        issues.append("Fragment and primer traits are routine; standard "
-                      "high-fidelity PCR (Phusion / Q5) suffices")
-    template_advice = {
-        "recommendation": "genomic DNA (gDNA) required",
-        "reason": "The promoter region lies upstream of the transcription start "
-                  "site (TSS) and exists only in genomic DNA; cDNA lacks this "
-                  "region, so use gDNA directly (no reverse transcription)",
-        "has_introns": None,
-    }
-    return {"level": level, "issues": issues, "amplicon_len": n,
-            "n_exons": 0, "has_introns": None,
             "template_advice": template_advice}
 
 
@@ -488,76 +433,10 @@ def _worst(*levels: str) -> str:
     return ranked[-1] if ranked else "UNKNOWN"
 
 
-def _assess_promoter(tx, pair, *, adapter_f: str = "", adapter_r: str = "",
-                     full_product: str = "", enzyme: str = "BsaI",
-                     site: str = BSAI, no_intron: Optional[bool] = None) -> Dict:
-    """Risk assessment for promoter mode: non-coding region, no frame /
-    synonymous-mutation concept.
-
-    Internal type-IIS site scans are run for both the seamless (BsaI) and Golden
-    Gate (PaqCI) schemes; the region is treated as non-CDS, so sites carry no
-    synonymous-mutation rescue (consistent with CDS-mode sites falling in a UTR).
-    """
-    cds_offset = 0
-    cds_len = pair.amplicon_len
-    enz = enzyme_risk(pair.amplicon, cds_offset=cds_offset,
-                      cds_len=cds_len, site=BSAI, enzyme="BsaI")
-    enz_gg = enzyme_risk(pair.amplicon, cds_offset=cds_offset,
-                        cds_len=cds_len, site=GG_SITE, enzyme=GG_ENZYME)
-    gc = gc_risk(pair.amplicon)
-    amp = _amp_promoter(pair)
-    pcr = pcr_advice(gc_overall=gc["overall"],
-                     max_win_gc=gc["max_window"]["gc"],
-                     min_win_gc=gc["min_window"]["gc"],
-                     amplicon_len=pair.amplicon_len,
-                     tm_f=pair.f_qc["tm"], tm_r=pair.r_qc["tm"],
-                     tm_diff=pair.tm_diff,
-                     amp_homopolymer=max_homopolymer(pair.amplicon),
-                     has_introns=None)
-    audit = (construct_site_audit(full_product, BSAI, "BsaI")
-             if full_product else {})
-    spec = pair.blast or {}
-    spec_level = spec.get("level", "UNKNOWN")
-
-    # anchoring / terminal integrity (promoter mode: referenced to TSS, no frame)
-    frame_issues = []
-    frame_level = "LOW"
-    r_shift = pair.offset
-    if r_shift == 0:
-        frame_issues.append("Reverse primer 5' end precisely anchored at the TSS "
-                            "(1 nt before the 5'-UTR start); product ends at the "
-                            "promoter-region boundary, carrying no UTR")
-    elif r_shift > 0:
-        frame_issues.append(
-            f"No ideal R within the 2 kb upstream region; R 5' end was extended "
-            f"{r_shift} nt into the 5'-UTR (fallback to the transcript UTR), so "
-            f"the product includes this {r_shift} nt UTR fragment")
-        frame_level = "MEDIUM"
-    else:
-        frame_issues.append(
-            f"Reverse primer 5' end extended {-r_shift} nt upstream of the "
-            f"5'-UTR (still within the promoter region); product ends there")
-    if not frame_issues:
-        frame_issues.append("R precisely anchored at TSS; product boundary clear")
-
-    overall = _worst(enz["level"], enz_gg["level"], gc["level"], amp["level"],
-                     pcr["level"], spec_level, frame_level)
-    return {
-        "enzyme": enz, "enzyme_gg": enz_gg, "gc": gc, "amplification": amp, "pcr": pcr,
-        "construct_audit": audit,
-        "specificity": {"level": spec_level, "detail": spec},
-        "frame": {"level": frame_level, "issues": frame_issues},
-        "overall": overall,
-    }
-
-
 def assess(tx, pair, *, adapter_f: str = "", adapter_r: str = "",
            full_product: str = "", enzyme: str = "BsaI",
            site: str = BSAI, no_intron: Optional[bool] = None) -> Dict:
     """Build the complete risk record attached to a primer pair."""
-    if getattr(tx, "mode", "cds") == "promoter":
-        return _assess_promoter(tx, pair, adapter_f=adapter_f,
-                                adapter_r=adapter_r, full_product=full_product)
     cds_offset = max(0, -pair.offset)
     cds_len = min(tx.cds_len, pair.amplicon_len - cds_offset)
 

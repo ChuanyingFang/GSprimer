@@ -254,6 +254,16 @@ def _risk_block(pair) -> str:
        {pcr.get('n_off', 0)}</b> off-target product(s)
        (of which {pcr.get('n_perfect_off', 0)} with both ends exact match);
        search method: {_e(det.get('method', '-'))}</p>'''
+        ons = pcr.get("on_target", [])
+        if ons:
+            rows = "".join(
+                f"<tr><td>{_e(o['subject'])}</td><td>{o['size']}</td>"
+                f"<td>{'exact target' if o.get('is_target') else 'same-gene isoform'}</td>"
+                f"<td>{o['left_pos']}-{o['right_pos']}</td></tr>"
+                for o in ons[:5])
+            spec_body += (f'<table class="mini"><tr><th>On-target sequence</th>'
+                          f'<th>Product bp</th><th>Match</th><th>Location</th></tr>'
+                          f'{rows}</table>')
         offs = pcr.get("off_target", [])[:5]
         if offs:
             rows = "".join(
@@ -313,26 +323,6 @@ def _risk_block(pair) -> str:
 # ============================================================
 # Main report
 # ============================================================
-
-def _anchor_text(p) -> str:
-    """Anchoring note: CDS mode reports ATG / stop-codon; promoter mode reports
-    the reverse primer 5' displacement relative to the TSS."""
-    if getattr(p, "mode", "cds") == "promoter":
-        if p.offset == 0:
-            return ("Reverse primer 5' end precisely anchored at the TSS "
-                    "(1 nt before the 5'-UTR start); product ends at the "
-                    "promoter-region terminus")
-        if p.offset < 0:
-            return (f"Reverse primer 5' end extends {-p.offset} nt upstream of "
-                    f"the 5'-UTR (within the promoter region); product ends there")
-        return (f"No ideal R found within the 2 kb upstream region; R 5' end "
-                f"extends {p.offset} nt into the 5'-UTR (fallback to the "
-                f"transcript UTR), so the product includes that {p.offset} nt "
-                f"UTR fragment")
-    return (f"Forward offset {p.offset:+d} nt (multiple of 3 "
-            f"{'✓' if p.offset % 3 == 0 else '✗'}); reverse "
-            f"{'strict stop-codon end' if p.r_ext == 0 else '+%d nt past stop' % p.r_ext}")
-
 
 def _pair_card(p, adapter_f: str, adapter_r: str, schemes,
               title: str = "Selected primer pair") -> str:
@@ -413,7 +403,9 @@ def _pair_card(p, adapter_f: str, adapter_r: str, schemes,
     <b>Pair</b><span class="mono">ΔTm {p.tm_diff:.2f}℃ |
       hetero-dimer ΔG {p.hetero_dimer_dg:.1f} kcal/mol |
       amplicon {p.amplicon_len} bp</span>
-    <b>Anchoring</b><span>{_anchor_text(p)}</span>
+    <b>Anchoring</b><span>forward offset {p.offset:+d} nt (multiple of 3
+      {'✓' if p.offset % 3 == 0 else '✗'}); reverse
+      {'strict stop-codon end' if p.r_ext == 0 else '+%d nt past stop' % p.r_ext}</span>
   </div>
   {_risk_block(p)}
 </div>'''
@@ -489,7 +481,6 @@ def generate_report(*, tx, isoforms: List[Dict], pairs: List,
                     scheme_sheets: Optional[Dict] = None) -> str:
     selected = selected or []
     sel_ids = {id(p) for p in selected}
-    is_promo = getattr(tx, "mode", "cds") == "promoter"
 
     iso_rows = "".join(
         f'<tr class="{"anchor" if r["transcript"] == tx.tx_id else ""}">'
@@ -522,10 +513,9 @@ def generate_report(*, tx, isoforms: List[Dict], pairs: List,
 
     sel_html = ""
     # Stage 1 (no selection): surface the full risk work-up for the best-ranked
-    # candidate (always an ATG..stop anchor, or the TSS-anchored R for promoter
-    # mode) so the report itself flags specificity, GC, internal type-IIS (both
-    # BsaI and PaqCI strands), frame and amplification risks without duplicating
-    # a card per candidate.
+    # candidate (always an ATG..stop anchor) so the report itself flags
+    # specificity, GC, internal type-IIS (both BsaI and PaqCI strands), frame and
+    # amplification risks without duplicating a card per candidate.
     risk_pairs = selected if selected else (pairs[:1] if pairs else [])
     for p in risk_pairs:
         pid = pairs.index(p) + 1
@@ -539,71 +529,38 @@ def generate_report(*, tx, isoforms: List[Dict], pairs: List,
     param_rows = "".join(f"<tr><td>{_e(k)}</td><td>{_e(v)}</td></tr>"
                          for k, v in p_.items() if not k.startswith("_"))
 
-    if is_promo:
-        title_txt = ("GS vector promoter / functional-element amplification "
-                     "primer design report")
-        sub_txt = (f"Target: <b>{_e(gene_query or tx.tx_id)}</b> · "
-                   f"promoter mode (upstream promoter region + optional "
-                   f"transcript 5'-UTR fallback) · "
-                   f"generated {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        tmpl_html = (
-            '<h2>1. Template (upstream promoter region)</h2>\n<div class="kv">\n'
-            f'  <b>Mode</b><span>promoter amplification (promoter)</span>\n'
-            f'  <b>Upstream promoter region</b><span>{tx.utr5_start} nt '
-            f'(TSS at its 3\' end)</span>\n'
-            f'  <b>UTR fallback sequence</b><span>{len(tx.mrna) - tx.utr5_start} nt'
-            f' (from the transcript 5\'-UTR, used only when R is not ideal)</span>\n'
-            f'  <b>Concatenated length</b><span>{len(tx.mrna)} nt</span>\n'
-            f'  <b>Structure check</b><span>{_e("; ".join(tx.validate()) or "pass: TSS position within sequence range")}</span>\n'
-            f'  <b>Notes</b><span>{_e("; ".join(tx.notes) or "-")}</span>\n'
-            '</div>')
-        cap_html = (
-            '<p style="font-size:12.5px;color:#666">★ = standard anchor pair with '
-            'the reverse primer 5\' end precisely anchored at the TSS (1 nt before '
-            'the 5\'-UTR start; mandated by the spec to be present among candidates). '
-            'Tier A = all SpacerFinder-derived filters pass; B = boundaries acceptable; '
-            'C = needs trade-off. offset is the reverse primer 5\' end displacement '
-            'relative to the TSS: 0 = precise anchor, negative = extended upstream of '
-            'the 5\'-UTR (within the promoter region, ≤100 nt), positive = extended into '
-            'the 5\'-UTR (transcript UTR fallback, ≤200 nt).</p>')
-    else:
-        title_txt = "GS vector CDS-amplification primer design report"
-        sub_txt = (f"Target: <b>{_e(gene_query or tx.tx_id)}</b> · "
-                   f"template transcript <b>{_e(tx.tx_id)}</b> ({_e(tx.source)} mode) · "
-                   f"generated {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        tmpl_html = (
-            '<h2>1. Template transcript</h2>\n<div class="kv">\n'
-            f'  <b>Transcript</b><span>{_e(tx.tx_id)} (gene {_e(tx.gene_id or "-")}, '
-            f'{_e(tx.chrom or "-")}{" " + tx.strand if tx.chrom else ""})</span>\n'
-            f'  <b>mRNA length</b><span>{len(tx.mrna)} nt (5\'UTR {tx.utr5_len} / '
-            f'CDS {tx.cds_len} / 3\'UTR {tx.utr3_len})</span>\n'
-            f'  <b>Protein</b><span>{tx.protein_len} aa</span>\n'
-            f'  <b>Structure check</b><span>{_e("; ".join(tx.validate()) or "pass: ATG start, stop-codon end, length multiple of 3, no internal stop")}</span>\n'
-            f'  <b>Notes</b><span>{_e("; ".join(tx.notes) or "-")}</span>\n'
-            '</div>\n'
-            '<table><tr><th>Transcript</th><th>mRNA</th><th>CDS</th><th>Protein(aa)</th>\n'
-            '<th>5\'UTR</th><th>3\'UTR</th><th>Exons</th><th>Structure issues</th></tr>\n'
-            f'{iso_rows}</table>\n'
-            '<p style="font-size:12.5px;color:#666">► marks the chosen transcript '
-            '(default rule: longest CDS; tie-break by longer mRNA).</p>')
-        cap_html = (
-            '<p style="font-size:12.5px;color:#666">★ = standard anchor pair with strict '
-            'ATG start / stop-codon end (mandated by the design spec to be present in '
-            'candidates). Tier A = all SpacerFinder-derived filters pass; B = boundaries '
-            'acceptable; C = needs trade-off. offset is the forward primer 5\' shift '
-            'relative to ATG, always a multiple of 3.</p>')
-
     doc = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>GSprimer report · {_e(gene_query or tx.tx_id)}</title>
 <style>{CSS}</style></head><body>
-<h1>GSprimer · {title_txt}</h1>
-<div class="sub">{sub_txt}</div>
+<h1>GSprimer · CDS-amplification primer design for GS / Golden Gate vectors</h1>
+<div class="sub">Target: <b>{_e(gene_query or tx.tx_id)}</b> ·
+  template transcript <b>{_e(tx.tx_id)}</b> ({_e(tx.source)} mode) ·
+  generated {time.strftime('%Y-%m-%d %H:%M:%S')}</div>
 
-{tmpl_html}
+<h2>1. Template transcript</h2>
+<div class="kv">
+  <b>Transcript</b><span>{_e(tx.tx_id)} (gene {_e(tx.gene_id or '-')},
+    {_e(tx.chrom or '-')}{' ' + tx.strand if tx.chrom else ''})</span>
+  <b>mRNA length</b><span>{len(tx.mrna)} nt (5'UTR {tx.utr5_len} /
+    CDS {tx.cds_len} / 3'UTR {tx.utr3_len})</span>
+  <b>Protein</b><span>{tx.protein_len} aa</span>
+  <b>Structure check</b><span>{_e('; '.join(tx.validate()) or 'pass: ATG start, stop-codon end, length multiple of 3, no internal stop')}</span>
+  <b>Notes</b><span>{_e('; '.join(tx.notes) or '-')}</span>
+</div>
+<table><tr><th>Transcript</th><th>mRNA</th><th>CDS</th><th>Protein(aa)</th>
+<th>5'UTR</th><th>3'UTR</th><th>Exons</th><th>Structure issues</th></tr>
+{iso_rows}</table>
+<p style="font-size:12.5px;color:#666">► marks the chosen transcript (default rule: longest CDS;
+tie-break by longer mRNA).</p>
 
 <h2>2. Candidate primer pairs</h2>
-{cap_html}
+<p style="font-size:12.5px;color:#666">★ = standard anchor pair with strict ATG start / stop-codon
+end (mandated by the design spec to be present in candidates). Tier A = all SpacerFinder-derived
+filters pass; B = boundaries acceptable; C = needs trade-off. offset is the forward primer 5' shift
+relative to ATG, always a multiple of 3. <b>BsaI</b> / <b>PaqCI</b> = number of internal
+type-IIS sites found inside the PCR product for the seamless (BsaI) and Golden Gate (PaqCI) schemes
+respectively — 0 in both is required for clean assembly.</p>
 <table><tr><th>#</th><th>Tier</th><th>offset</th>
 <th>Forward 5'→3'</th><th>nt</th><th>Tm (core)</th><th>GC%</th>
 <th>Reverse 5'→3'</th><th>nt</th><th>Tm (core)</th><th>GC%</th>
@@ -618,8 +575,8 @@ def generate_report(*, tx, isoforms: List[Dict], pairs: List,
 <h2>{'4' if sel_html else '4'}. Design parameters</h2>
 <table><tr><th>Parameter</th><th>Value</th></tr>{param_rows}</table>
 
-<footer>GSprimer v2.0 · thermodynamics &amp; filters inherited from SpacerFinder v2.4.5
-(amplicon-size limit excluded for CDS) · dual CDS/promoter mode · palette Fv1.4</footer>
+<footer>GSprimer v1.2.0 · thermodynamics &amp; filters inherited from SpacerFinder v2.4.5
+(amplicon-size limit excluded) · Tm shown is the core-primer Tm (adapter excluded) · palette Fv1.4</footer>
 </body></html>'''
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)

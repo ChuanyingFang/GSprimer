@@ -62,14 +62,26 @@ def blast_primer(seq: str, blastn: str = "blastn", db: str = "",
     fd2, out = tempfile.mkstemp(suffix=".tsv", prefix="gsp_")
     os.close(fd2)
     try:
-        subprocess.run(
+        # NOTE (local patch 2026-10-03): BLAST+ >= 2.16 rejects
+        # `-num_alignments` when `-max_target_seqs` is also passed
+        #   Error: Argument "num_alignments". Incompatible with argument:
+        #          `max_target_seqs'
+        # blastn then exits with rc=1 and an EMPTY output file, which used to be
+        # silently parsed as "0 hits" and mis-reported as a HIGH specificity
+        # risk. Only `-max_target_seqs` is passed; for `-outfmt 6` it already
+        # caps the number of subject sequences reported.
+        proc = subprocess.run(
             [blastn, "-task", "blastn-short", "-db", db,
              "-query", fa, "-out", out,
              "-outfmt", "6 qseqid sseqid pident length mismatch gapopen "
                         "qstart qend sstart send evalue bitscore",
              "-evalue", "1000", "-word_size", "7", "-dust", "no",
-             "-max_target_seqs", str(max_hits), "-num_alignments", str(max_hits)],
+             "-max_target_seqs", str(max_hits)],
             capture_output=True, timeout=120)
+        if proc.returncode != 0:
+            msg = proc.stderr.decode("utf-8", "replace").strip()
+            return {"error": f"blastn failed (rc={proc.returncode}): "
+                             f"{msg[-400:]}", "hits": []}
         hits = []
         with open(out) as f:
             for line in f:
@@ -214,13 +226,20 @@ def primer_risk(cls: Dict) -> str:
 # ============================================================
 
 def insilico_pcr(f_hits: List[Dict], r_hits: List[Dict],
-                 expect_len: int = 0,
+                 expect_len: int = 0, target_gene: str = "",
                  max_len: int = MAX_SPURIOUS_AMPLICON) -> Dict:
     """Predict every amplicon a primer pair could generate.
 
     An amplicon requires a plus-oriented 3' end upstream of a minus-oriented
     3' end on the same subject, within `max_len`.
     Also checks F+F and R+R self-amplification.
+
+    `target_gene` (local patch 2026-10-03): when supplied, any product whose
+    subject collapses to that gene is counted as an ON-target product. Without
+    it, co-amplified isoforms of the target locus (very common when cloning a
+    CDS from a multi-isoform gene) were reported as *perfect off-target*
+    products and pushed the specificity level to HIGH — even though
+    `classify`/`primer_risk` already collapse isoforms via `_gene_key`.
     """
     products = []
     tagged = ([dict(h, primer="F") for h in f_hits]
@@ -238,29 +257,38 @@ def insilico_pcr(f_hits: List[Dict], r_hits: List[Dict],
             for m in minus:
                 size = m["three_prime_pos"] - p["three_prime_pos"] + 1
                 if 0 < size <= max_len:
+                    gene = _gene_key(subj)
                     products.append({
-                        "subject": subj, "size": size,
+                        "subject": subj, "gene": gene, "size": size,
                         "left": p["primer"], "right": m["primer"],
                         "left_mm": p["total_mm"], "right_mm": m["total_mm"],
                         "left_pos": p["three_prime_pos"],
                         "right_pos": m["three_prime_pos"],
+                        "is_isoform": bool(target_gene and gene == target_gene),
                         "is_target": (p["primer"] == "F" and m["primer"] == "R"
                                       and p["total_mm"] == 0
                                       and m["total_mm"] == 0
                                       and (expect_len == 0
                                            or abs(size - expect_len) <= 5)),
                     })
-    products.sort(key=lambda x: (not x["is_target"], x["left_mm"] + x["right_mm"],
+    products.sort(key=lambda x: (not x["is_target"],
+                                 not x["is_isoform"],
+                                 x["left_mm"] + x["right_mm"],
                                  x["size"]))
-    on_target = [p for p in products if p["is_target"]]
-    off_target = [p for p in products if not p["is_target"]]
+    # A product on the target gene counts as on-target, even when the size does
+    # not match `expect_len` (other isoform, or an unspliced/genomic template
+    # whose product is inflated by introns).
+    on_target = [p for p in products if p["is_target"] or p["is_isoform"]]
+    off_target = [p for p in products if not (p["is_target"] or p["is_isoform"])]
     perfect_off = [p for p in off_target
                    if p["left_mm"] == 0 and p["right_mm"] == 0]
 
     if perfect_off:
         level = "HIGH"
+    elif not on_target and expect_len:
+        level = "HIGH"
     elif len(on_target) != 1 and expect_len:
-        level = "HIGH" if not on_target else "MEDIUM"
+        level = "MEDIUM"      # the locus itself yields several products
     elif off_target:
         level = "MEDIUM" if len(off_target) > 2 else "LOW-MED"
     else:
@@ -268,7 +296,8 @@ def insilico_pcr(f_hits: List[Dict], r_hits: List[Dict],
 
     return {"products": products, "on_target": on_target,
             "off_target": off_target, "n_off": len(off_target),
-            "n_perfect_off": len(perfect_off), "level": level}
+            "n_perfect_off": len(perfect_off), "level": level,
+            "target_gene": target_gene}
 
 
 # ============================================================
@@ -277,7 +306,7 @@ def insilico_pcr(f_hits: List[Dict], r_hits: List[Dict],
 
 def check_pair(f_seq: str, r_seq: str, *, blastn: str = "blastn",
                db: str = "", fallback_db: Optional[Dict[str, str]] = None,
-               expect_len: int = 0) -> Dict:
+               expect_len: int = 0, target_gene: str = "") -> Dict:
     """Full specificity workup for one primer pair."""
     method = "blast"
     if blast_available(blastn, db):
@@ -301,9 +330,18 @@ def check_pair(f_seq: str, r_seq: str, *, blastn: str = "blastn",
                          "provided; specificity cannot be assessed",
                 "level": "UNKNOWN"}
 
+    # A failed search is NOT evidence against the primers. Reporting "0 hits"
+    # as HIGH would be a false alarm, so the whole workup degrades to UNKNOWN.
+    if method == "error":
+        return {"method": method, "available": True, "error": err,
+                "f": {}, "r": {}, "pcr": {},
+                "f_risk": "UNKNOWN", "r_risk": "UNKNOWN",
+                "level": "UNKNOWN"}
+
     f_cls = classify(f_hits, len(f_seq))
     r_cls = classify(r_hits, len(r_seq))
-    pcr = insilico_pcr(f_hits, r_hits, expect_len=expect_len)
+    pcr = insilico_pcr(f_hits, r_hits, expect_len=expect_len,
+                       target_gene=target_gene)
 
     levels = {"LOW": 0, "LOW-MED": 1, "MEDIUM": 2, "HIGH": 3, "UNKNOWN": 2}
     worst = max(primer_risk(f_cls), primer_risk(r_cls), pcr["level"],
