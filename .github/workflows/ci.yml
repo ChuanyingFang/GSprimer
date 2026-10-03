@@ -24,8 +24,8 @@ jobs:
       - name: Smoke test (no BLAST, demo CDS)
         run: |
           python -m gsprimer.cli --gene DEMO_G1.1 \
-            --cds tests/demo_data/demo_cds.fa --outdir tests/out_ci --no-blast
-          python -m gsprimer.cli --finalize --select 1 --outdir tests/out_ci
+            --cds tests/demo_data/demo_cds.fa --outdir tests/out_ci --no-blast --yes
+          python -m gsprimer.cli --finalize --select 1 --yes --outdir tests/out_ci
           test -f tests/out_ci/DEMO_G1.1_GSprimer_final.html
           test -f tests/out_ci/DEMO_G1.1_order.tsv
       - name: Clean up CI output
